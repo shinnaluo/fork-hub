@@ -1,0 +1,114 @@
+# fork-hub 控制中心 · 只读检查工作流（永远不写入任何 fork）
+# 部署前提：Settings -> Secrets and variables -> Actions 添加 secret
+#   FORK_SYNC_PAT = 能写所有 fork 的 PAT（classic: repo scope；
+#   fine-grained: All repositories + Contents read/write + Metadata read）。
+#   内置的 GITHUB_TOKEN 权限仅限本仓库，不能用来同步其他 fork。
+# 定时：每天 UTC 01:17（北京时间 09:17），只在默认分支生效；
+#   公共仓库 60 天无活动会自动停用定时任务，需手动重新启用。
+# 首次使用：先在 Actions 页面手动 Run workflow 一次，之后才能用 API dispatch。
+#
+# 三种运行形态：
+#   半自动（默认）：定时检查只会刷新「Fork 同步状态」Issue，由你决定是否点 apply。
+#   全自动：Settings -> Secrets and variables -> Actions -> Variables 新建
+#           AUTO_APPLY = true。之后每次检查发现待更新项就会自动触发 apply。
+#           也可在手动 Run workflow 时勾选 auto_apply，只对这一次生效。
+#   纯本地：不用本仓库，直接跑 fork-sync/fork_updater.py。
+# 注意：用 GITHUB_ENV 写的变量不进 step 的 env context，因此计数走 step output，
+#       不能用 if: env.PENDING != '0' 判断（恒为真会误触发更新）。
+name: check forks
+
+on:
+  schedule:
+    - cron: "17 1 * * *"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma separated repo names; blank means all forks"
+        required: false
+        default: ""
+      auto_apply:
+        description: "Automatically trigger the apply workflow when updates are pending"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: fork-hub-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check all forks (read-only)
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          args=()
+          if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
+          python fork_updater.py "${args[@]}" --json plan.json --report fork-report.html
+
+      - name: Count pending updates
+        id: count
+        run: |
+          python - <<'PY'
+          import json, os
+          d = json.load(open("plan.json", encoding="utf-8"))
+          n = sum(1 for r in d["forks"] if r["category"] in ("fast_forward", "diverged"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("pending=%d\n" % n)
+          print("pending updates:", n)
+          PY
+
+      - name: Maintain the status issue (plan)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PLAN_PATH: plan.json
+          MODE: plan
+        run: python sync_issue.py
+
+      - name: Optionally trigger the apply workflow
+        if: >-
+          ${{ steps.count.outputs.pending != '0' &&
+              (inputs.auto_apply == true || inputs.auto_apply == 'true' ||
+               vars.AUTO_APPLY == 'true') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          payload = {"ref": os.environ["REF"],
+                     "inputs": {"on_conflict": "keep", "only": ""}}
+          url = "https://api.github.com/repos/%s/actions/workflows/apply-forks.yml/dispatches" % os.environ["GITHUB_REPOSITORY"]
+          req = urllib.request.Request(
+              url, data=json.dumps(payload).encode(), method="POST",
+              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json",
+                       "User-Agent": "fork-hub"})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              print("apply workflow dispatched, HTTP", r.status)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-plan-${{ github.run_number }}
+          path: |
+            plan.json
+            fork-report.html
+          retention-days: 14

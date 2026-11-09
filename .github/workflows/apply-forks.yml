@@ -1,0 +1,139 @@
+# fork-hub 控制中心 · 实际写入工作流（唯一会修改 fork 的地方）
+# 只能手动触发，或由 check 工作流在 auto_apply / vars.AUTO_APPLY 开启时触发。
+# FORK_SYNC_PAT 见 check-forks.yml 顶部说明。
+# 默认 --on-conflict keep：真冲突时 fork 保持原样、备份分支保留改动、生成指引。
+# upstream 选项会丢弃全部自有提交，仅在明确需要时选择。
+#
+# 想全自动：不要在这里加 schedule，而是在 Settings -> Variables 设 AUTO_APPLY=true，
+# 由 check 工作流在确认有待更新项时才触发本工作流，避免每天无谓地写所有 fork。
+name: apply fork updates
+
+on:
+  workflow_dispatch:
+    inputs:
+      on_conflict:
+        description: "Conflict policy: keep / skip / upstream (upstream DISCARDS your commits)"
+        required: true
+        default: "keep"
+        type: choice
+        options:
+          - keep
+          - skip
+          - upstream
+      only:
+        description: "Comma separated repo names; blank means all forks"
+        required: false
+        default: ""
+      fail_on_conflict:
+        description: "Mark this run as failed when a real conflict needs manual handling"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fork-hub-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify the sync PAT
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          tok = os.environ.get("GH_TOKEN", "")
+          if not tok:
+              raise SystemExit("缺少 FORK_SYNC_PAT：无法写入任何 fork")
+          req = urllib.request.Request(
+              "https://api.github.com/user",
+              headers={"Authorization": "Bearer " + tok,
+                       "Accept": "application/vnd.github+json",
+                       "User-Agent": "fork-hub"})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              u = json.load(r)
+              scopes = r.headers.get("X-OAuth-Scopes")
+          print("PAT owner:", u.get("login"))
+          print("scopes:", scopes or "(fine-grained PAT 无 scope 头，需确认覆盖 All repositories)")
+          print("提示：PAT 必须能在每个 fork 上创建备份分支并写默认分支，否则合并会失败。")
+          PY
+
+      - name: Sync forks with upstream
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+          ON_CONFLICT: ${{ inputs.on_conflict }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          args=(--apply --yes --on-conflict "$ON_CONFLICT")
+          if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
+          python fork_updater.py "${args[@]}" --json result.json \
+            --report fork-update-report.html --guide conflict-guide.md
+
+      - name: Maintain the status issue (result)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PLAN_PATH: result.json
+          MODE: result
+        run: python sync_issue.py
+
+      - name: Flag conflicts and write run summary
+        if: always()
+        env:
+          FAIL_ON_CONFLICT: ${{ inputs.fail_on_conflict }}
+        run: |
+          python - <<'PY'
+          import json, os
+          try:
+              d = json.load(open("result.json", encoding="utf-8"))
+          except Exception as e:
+              d = {"forks": []}
+              print("::warning::无法读取 result.json：%s" % e)
+          forks = d.get("forks", [])
+          conflicts = [r for r in forks if r.get("conflict")]
+          updated = [r for r in forks
+                     if r.get("result", "").startswith(("已更新", "已按 upstream"))]
+          lines = ["## Fork 同步结果", "",
+                   "- 已更新：**%d**" % len(updated),
+                   "- 需人工处理冲突：**%d**" % len(conflicts), ""]
+          for r in updated:
+              lines.append("- `%s`：%s ｜ 复核落后 %s ｜ 备份 %s" % (
+                  r.get("name"), r.get("result"), r.get("behind_after"),
+                  r.get("backup_ref") or "无（快进不需备份）"))
+          for r in conflicts:
+              lines.append("- ⚠️ `%s`：%s ｜ 备份 %s" % (
+                  r.get("name"), r.get("result"), r.get("backup_ref") or "无"))
+          if conflicts:
+              lines += ["", "> fork 保持更新前状态，提交未丢失；"
+                        "解决步骤见状态 Issue 与 artifact `conflict-guide.md`。"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if conflicts and os.environ.get("FAIL_ON_CONFLICT") in ("true", True):
+              raise SystemExit("存在 %d 个需人工处理的冲突（fail_on_conflict 已开启）" % len(conflicts))
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-update-${{ github.run_number }}
+          path: |
+            result.json
+            fork-update-report.html
+            conflict-guide.md
+          if-no-files-found: ignore
+          retention-days: 30
