@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+plan.json
+result.json
+fork-report.html
+fork-update-report.html
+conflict-guide.md
