@@ -97,11 +97,13 @@ def fmt(v):
 def pending_records(forks, mode):
     """plan 模式按分类统计；result 模式剔除本次已成功更新的，避免清单与结果互相矛盾。"""
     if mode == "plan":
-        return [r for r in forks if r.get("category") in ("fast_forward", "diverged")]
+        return [r for r in forks if r.get("category") in
+                ("fast_forward", "diverged", "upstream_rewritten")]
     out = []
     for r in forks:
-        if r.get("conflict") or r.get("category") in ("fast_forward", "diverged"):
-            done = r.get("result", "").startswith(("已更新", "已按 upstream"))
+        if r.get("conflict") or r.get("category") in (
+                "fast_forward", "diverged", "upstream_rewritten"):
+            done = r.get("result", "").startswith(("已更新", "已按 upstream", "已对齐"))
             if done and not r.get("conflict"):
                 continue
             out.append(r)
@@ -129,8 +131,10 @@ def render_plan(d, unresolved, todo, source):
             "| --- | --- | --- | --- | --- | --- |",
         ]
         for r in sorted(todo, key=lambda x: x.get("name", "").lower()):
-            kind = "可快进（无自有改动）" if r.get("category") == "fast_forward" \
-                else "保留我的改动后合并"
+            kind = ("可快进（无自有改动）" if r.get("category") == "fast_forward"
+                    else "备份后对齐上游（放弃被上游剔除的旧提交）"
+                    if r.get("category") == "upstream_rewritten"
+                    else "保留我的改动后合并")
             risk = ("双方改过 %d 个同名文件" % len(r["risk_files"])) \
                 if r.get("risk_files") else "—"
             lines.append("| [%s](https://github.com/%s) | %s | %s | %s | %s | %s |" % (
@@ -164,9 +168,11 @@ def render_result(d, err):
         ])
     forks = d.get("forks", [])
     acted = [r for r in forks if r.get("result")]
-    updated = [r for r in acted if r["result"].startswith(("已更新", "已按 upstream"))]
+    updated = [r for r in acted if r["result"].startswith(
+        ("已更新", "已按 upstream", "已对齐"))]
     ff = [r for r in updated if r.get("category") == "fast_forward"]
     merged = [r for r in updated if r.get("category") == "diverged"]
+    aligned = [r for r in updated if r.get("category") == "upstream_rewritten"]
     conflicts = [r for r in forks if r.get("conflict")]
     skipped = [r for r in acted if "跳过" in r["result"]]
     failed = [r for r in acted if not r.get("conflict")
@@ -177,9 +183,10 @@ def render_result(d, err):
         "",
         "执行时间：%s ｜ 冲突策略：`%s`" % (stamp(), d.get("on_conflict") or "keep"),
         "",
-        "已更新 **%d**（直接快进 %d / 保留改动后合并 %d）｜ 冲突 **%d** ｜ "
+        "已更新 **%d**（直接快进 %d / 保留改动后合并 %d / 对齐上游 %d）｜ 冲突 **%d** ｜ "
         "跳过 **%d** ｜ 其他失败 **%d**" % (
-            len(updated), len(ff), len(merged), len(conflicts), len(skipped), len(failed)),
+            len(updated), len(ff), len(merged), len(aligned),
+            len(conflicts), len(skipped), len(failed)),
         "",
     ]
     if acted:
@@ -188,7 +195,10 @@ def render_result(d, err):
             "| --- | --- | --- | --- | --- | --- |",
         ]
         for r in sorted(acted, key=lambda x: x.get("name", "").lower()):
-            kind = "直接快进" if r.get("category") == "fast_forward" else "保留改动后合并"
+            kind = ("直接快进" if r.get("category") == "fast_forward"
+                    else "对齐上游（放弃废弃提交）"
+                    if r.get("category") == "upstream_rewritten"
+                    else "保留改动后合并")
             behind = r.get("behind_after")
             verify = ("✅ 0" if behind == 0 else "⚠️ %s" % fmt(behind))
             backup = ("`%s`" % r["backup_ref"]) if r.get("backup_ref") else "—"

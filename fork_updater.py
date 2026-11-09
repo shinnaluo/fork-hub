@@ -8,11 +8,22 @@
   4. --apply 按同样的规则执行：
        - 无自有提交 + 上游有更新  -> 直接快进（merge-upstream）
        - 有自有提交 + 上游有更新  -> 先建备份分支，再合并上游，保留你的改动
+       - 上游重写历史，fork 独有提交全是被上游放弃的旧提交 -> 备份后对齐上游
        - 上游无更新 / 已同步      -> 完全不动
-     默认永不使用 force push，永不删除分支或提交。
+     默认除「对齐上游」外永不使用 force push，永不删除分支或提交。
   5. 冲突处理（见下方「关于冲突」）：预检风险文件、409 冲突时安全停下并给出
      可复制的解决命令；--on-conflict 可选 keep / skip / upstream 三种策略。
   6. 生成 HTML 报告、冲突处置指引与可选 JSON 结果。
+
+关于上游重写历史：
+  fork 独有提交不再一律当成「我的改动」。脚本会逐个比对提交作者与上游仓库
+  最近 100 个提交的作者身份（login / author email / committer email），并把
+  GitHub 自动生成的 Sync fork 合并提交识别为同步噪声：
+    - 独有提交全部来自上游作者或是同步噪声 -> 判定「上游已放弃」，备份后对齐上游；
+    - 只要有一个提交不是上游作者写的（你本人、第三方贡献者、本地提交）->
+      一律视为你的功能，按原有规则保留；混合情况不会自动强推，会在报告里提示。
+  这样上游 force push / rebase / 回退掉的旧提交不会在 fork 里变成永久累赘，
+  而你真正改过的功能永远不会被丢掉。备份分支始终保留，可随时恢复。
 
 关于冲突：
   GitHub 的 merge-upstream 在内容冲突时返回 409 且不会改动 fork，因此脚本永远
@@ -33,6 +44,12 @@
   python fork_updater.py --json plan.json --no-report
   python fork_updater.py --apply --on-conflict skip      # 预检有风险则不动，等人工处理
   python fork_updater.py --apply --on-conflict upstream  # 危险：备份后强制对齐上游，丢弃自有改动
+  python fork_updater.py --on-rewrite keep              # 兼容旧行为：不清理被上游放弃的历史
+
+--on-rewrite 策略（默认 align）：
+  align    上游重写历史且 fork 独有提交不是你的功能时，先备份再把分支对齐上游，
+           同步放弃那些已被上游剔除的旧提交。交互模式下会额外确认一次。
+  keep     保留旧行为：任何 fork 独有提交都当作需要保留，不去对齐。
 
 --on-conflict 策略：
   keep     （默认）先备份，再尝试合并；409 冲突时 fork 保持原样，输出解决指引。
@@ -46,6 +63,7 @@ import concurrent.futures
 import html
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -65,6 +83,7 @@ IN_SYNC = "in_sync"          # 与上游完全一致
 LOCAL_ONLY = "local_only"    # 仅有自己的提交，上游没有更新
 FAST_FORWARD = "fast_forward"  # 无自有提交，上游有更新 -> 直接快进
 DIVERGED = "diverged"        # 双方都有提交 -> 备份后合并
+REWRITE = "upstream_rewritten"  # 上游重写历史，fork 独有提交全是被上游放弃的旧提交
 ARCHIVED = "archived"        # fork 已归档，只读
 UNKNOWN = "unknown"          # 上游不可访问 / 比对失败
 
@@ -75,20 +94,40 @@ CONFLICT_UPSTREAM = "upstream"  # 显式授权：备份后强制对齐上游
 CONFLICT_POLICIES = (CONFLICT_KEEP, CONFLICT_SKIP, CONFLICT_UPSTREAM)
 DEFAULT_GUIDE = os.path.join(BASE_DIR, "conflict-guide.md")
 
-ORDER = {DIVERGED: 0, FAST_FORWARD: 1, UNKNOWN: 2, LOCAL_ONLY: 3, ARCHIVED: 4, IN_SYNC: 5}
+# 上游历史被重写时的策略
+REWRITE_ALIGN = "align"       # 默认：备份后对齐上游，放弃被上游剔除的旧提交
+REWRITE_KEEP = "keep"         # 兼容旧行为：一律保留
+REWRITE_POLICIES = (REWRITE_ALIGN, REWRITE_KEEP)
+
+# 这些身份是 GitHub 平台自己，不能用来判定「上游作者」
+GENERIC_EMAILS = {"noreply@github.com", "noreply@users.noreply.github.com",
+                  "web-flow@users.noreply.github.com", ""}
+SYNC_MERGE_RE = re.compile(
+    r"^Merge (branch|pull request|remote-tracking branch|upstream)\b", re.I)
+
+ORDER = {REWRITE: -1, DIVERGED: 0, FAST_FORWARD: 1, UNKNOWN: 2,
+         LOCAL_ONLY: 3, ARCHIVED: 4, IN_SYNC: 5}
 LABEL = {
     IN_SYNC: "已同步",
     LOCAL_ONLY: "仅你有改动",
     FAST_FORWARD: "上游有更新 · 可快进",
     DIVERGED: "双方均有改动 · 需保留后合并",
+    REWRITE: "上游已重写历史 · 需对齐",
     ARCHIVED: "已归档 · 只读",
     UNKNOWN: "无法比对",
 }
+ORIGIN_LABEL = {
+    "discarded_upstream": "上游作者提交（已被上游放弃）",
+    "discarded_sync": "GitHub 自动同步合并提交",
+    "mine": "你的功能提交（保留）",
+}
+
 ACTION = {
     IN_SYNC: "无需操作",
     LOCAL_ONLY: "上游无新提交，你的改动原样保留，不动",
     FAST_FORWARD: "直接快进到上游最新提交",
     DIVERGED: "先备份你的分支，再合并上游；能自动合并就保留全部自有改动，真冲突则安全停下并给解决指引",
+    REWRITE: "先建备份分支，再对齐上游：同步放弃被上游剔除的旧提交（不含你的功能改动）",
     ARCHIVED: "仓库已归档，跳过更新",
     UNKNOWN: "需人工检查上游是否改名、删除或转为私有",
 }
@@ -193,6 +232,8 @@ def analyze(gh, login, fork):
         "merge_base": "", "risk_files": [], "risk_checked": False, "risk_error": "",
         "upstream_sha": "", "conflict": False, "conflict_message": "",
         "conflict_guide": "",
+        "ownership_checked": False, "ownership_error": "", "commit_origins": [],
+        "mine_commits": 0, "discarded_commits": 0,
     }
     st, detail = gh.get("/repos/" + full)
     if st != 200:
@@ -241,11 +282,62 @@ def current_head(gh, rec):
     return ""
 
 
-def apply_updates(gh, login, records, stamp, policy=CONFLICT_KEEP):
-    todo = [r for r in records if r["category"] in (FAST_FORWARD, DIVERGED)]
+def verify_after(gh, login, rec):
+    """更新后复核：落后上游数应归零，对齐后不应再有任何独有提交。"""
+    rec["head_after"] = current_head(gh, rec)
+    st, cmp = gh.get(compare_path(rec["upstream"], rec["upstream_branch"],
+                                  login, rec["branch"]))
+    if st != 200:
+        return
+    behind = cmp.get("behind_by") or 0
+    rec["behind_after"] = behind
+    rec["ahead_after"] = cmp.get("ahead_by") or 0
+    if rec["result"].startswith(("已更新", "已按 upstream", "已对齐")):
+        rec["result"] += " · 复核落后 %d" % behind
+    if rec["category"] == REWRITE and rec["ahead_after"]:
+        rec["result"] += " · 注意仍有 %d 个独有提交" % rec["ahead_after"]
+
+
+def apply_updates(gh, login, records, stamp, policy=CONFLICT_KEEP,
+                  rewrite_policy=REWRITE_ALIGN):
+    todo = [r for r in records if r["category"] in (FAST_FORWARD, DIVERGED, REWRITE)]
     for rec in todo:
         repo = rec["fork"]
         branch = rec["branch"]
+
+        # 上游重写历史：独有提交里没有你的功能，备份后对齐上游，同步放弃废弃提交
+        if rec["category"] == REWRITE:
+            if rewrite_policy == REWRITE_KEEP:
+                rec["result"] = "按 --on-rewrite keep 保留历史，未写入"
+                print("  [保留] %s -> %s" % (rec["name"], rec["result"]))
+                continue
+            sha = current_head(gh, rec) or rec["head_before"]
+            up_sha = rec["upstream_sha"] or upstream_head(gh, rec)
+            if not (sha and up_sha):
+                rec["result"] = "中止：无法读取 fork / 上游 HEAD，未写入"
+                continue
+            backup = "backup/%s-before-rewrite-%s" % (branch, stamp)
+            st, d = gh.request("POST", "/repos/%s/git/refs" % repo,
+                               {"ref": "refs/heads/" + backup, "sha": sha})
+            if st not in (200, 201):
+                rec["result"] = "中止：备份分支创建失败（HTTP %s %s），未写入" % (
+                    st, (d or {}).get("message", ""))
+                continue
+            rec["backup_ref"] = backup
+            print("  [备份] %s -> %s (%s)" % (rec["name"], backup, sha[:8]))
+            st2, d2 = gh.request("PATCH", "/repos/%s/git/refs/heads/%s" % (
+                repo, urllib.parse.quote(branch, safe="")),
+                {"sha": up_sha, "force": True})
+            if st2 == 200:
+                rec["result"] = ("已对齐上游：放弃 %d 个被上游剔除的提交；备份 %s 可恢复"
+                                 % (rec["discarded_commits"], backup))
+            else:
+                rec["result"] = ("失败：对齐上游 HTTP %s %s（fork 未改动，备份 %s）"
+                                 % (st2, (d2 or {}).get("message", ""), backup))
+            print("  [对齐] %s -> %s" % (rec["name"], rec["result"]))
+            verify_after(gh, login, rec)
+            print("     -> %s" % rec["result"])
+            continue
 
         # skip 策略：预检发现双方改过同名文件时完全不写入，等人工决定
         if policy == CONFLICT_SKIP and rec["category"] == DIVERGED and rec["risk_files"]:
@@ -311,15 +403,7 @@ def apply_updates(gh, login, records, stamp, policy=CONFLICT_KEEP):
         else:
             rec["result"] = "失败：HTTP %s %s" % (st, (d or {}).get("message", ""))
 
-        rec["head_after"] = current_head(gh, rec)
-        # 复核：落后上游的提交数应归零
-        st2, cmp = gh.get(compare_path(rec["upstream"], rec["upstream_branch"], login, rec["branch"]))
-        if st2 == 200:
-            behind = cmp.get("behind_by") or 0
-            rec["behind_after"] = behind
-            rec["ahead_after"] = cmp.get("ahead_by") or 0
-            if rec["result"].startswith(("已更新", "已按 upstream")):
-                rec["result"] += " · 复核落后 %d" % behind
+        verify_after(gh, login, rec)
         print("     -> %s" % rec["result"])
     return todo
 
@@ -330,6 +414,107 @@ def upstream_head(gh, rec):
     if st == 200:
         return (d.get("object") or {}).get("sha", "")
     return ""
+
+
+def full_compare_path(rec, login):
+    """不带 per_page=1，用于拿到 fork 独有提交的完整列表。"""
+    base = urllib.parse.quote(rec["upstream_branch"], safe="")
+    head = urllib.parse.quote(login + ":" + rec["branch"], safe=":")
+    return "/repos/%s/compare/%s...%s?per_page=100" % (rec["upstream"], base, head)
+
+
+def upstream_author_set(gh, rec, login):
+    """上游默认分支最近 100 个提交的作者身份；读不到就返回 None（保守保留）。"""
+    st, d = gh.get("/repos/%s/commits?sha=%s&per_page=100" % (
+        rec["upstream"], urllib.parse.quote(rec["upstream_branch"], safe="")))
+    if st != 200 or not isinstance(d, list) or not d:
+        return None
+    ids = set()
+    for c in d:
+        a = c.get("author") or {}
+        if a.get("login"):
+            ids.add("login:" + a["login"].lower())
+        for g in ((c.get("commit") or {}).get("author") or {},
+                  (c.get("commit") or {}).get("committer") or {}):
+            e = (g.get("email") or "").strip().lower()
+            if e not in GENERIC_EMAILS:
+                ids.add("email:" + e)
+    # 本账号身份绝不能被当作「上游作者」，否则会把自己的改动误判成可丢弃
+    ids.discard("login:" + login.lower())
+    return ids
+
+
+def classify_commit_origin(c, upstream_ids):
+    """判定 fork 独有提交能不能被放弃。
+
+    只有两类允许放弃：GitHub 自动生成的同步合并提交，以及能确认由上游作者
+    写的提交。其余（本人、第三方贡献者、本地提交、身份无法识别）一律视为
+    需要保留的 fork 自有功能 —— 宁可多留，绝不误删。
+    """
+    commit = c.get("commit") or {}
+    msg = (commit.get("message") or "").splitlines()
+    first = (msg[0] if msg else "").strip()
+    ga = commit.get("author") or {}
+    gc = commit.get("committer") or {}
+    parents = c.get("parents") or []
+    if (len(parents) >= 2
+            and (gc.get("email") or "").strip().lower() in
+            ("noreply@github.com", "web-flow@users.noreply.github.com")
+            and SYNC_MERGE_RE.match(first)):
+        return "discarded_sync"
+    ids = set()
+    a = c.get("author") or {}
+    if a.get("login"):
+        ids.add("login:" + a["login"].lower())
+    for g in (ga, gc):
+        e = (g.get("email") or "").strip().lower()
+        if e not in GENERIC_EMAILS:
+            ids.add("email:" + e)
+    if ids & upstream_ids:
+        return "discarded_upstream"
+    return "mine"
+
+
+def analyze_ownership(gh, login, records):
+    """对所有 ahead>0 的仓库判断 fork 独有提交来源。纯只读，失败一律保守保留。"""
+    targets = [r for r in records
+               if r["ahead_by"] and r["category"] in (LOCAL_ONLY, DIVERGED)]
+    if not targets:
+        return
+
+    def work(rec):
+        st, cmp = gh.get(full_compare_path(rec, login))
+        if st != 200:
+            rec["ownership_error"] = "compare HTTP %s，保守保留" % st
+            return rec
+        commits = cmp.get("commits") or []
+        if len(commits) < (rec["ahead_by"] or 0):
+            rec["ownership_error"] = "独有提交超过 compare 上限，保守保留"
+            return rec
+        ids = upstream_author_set(gh, rec, login)
+        if ids is None:
+            rec["ownership_error"] = "无法读取上游提交作者，保守保留"
+            return rec
+        origins = []
+        for c in commits:
+            text = ((c.get("commit") or {}).get("message") or "").splitlines()
+            origins.append({
+                "sha": (c.get("sha") or "")[:10],
+                "origin": classify_commit_origin(c, ids),
+                "message": (text[0] if text else "")[:80],
+            })
+        rec["commit_origins"] = origins
+        rec["mine_commits"] = sum(1 for x in origins if x["origin"] == "mine")
+        rec["discarded_commits"] = sum(1 for x in origins
+                                       if x["origin"].startswith("discarded"))
+        rec["ownership_checked"] = True
+        # 只有「一个需保留的提交都没有」时才允许对齐；混合情况绝不自动强推
+        if rec["mine_commits"] == 0 and rec["discarded_commits"] > 0:
+            rec["category"] = REWRITE
+        return rec
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        list(ex.map(work, targets))
 
 
 def changed_file_set(gh, repo, base, head):
@@ -459,7 +644,7 @@ def print_plan(records, applied):
         groups.setdefault(r["category"], []).append(r)
     title = "执行结果" if applied else "检查计划（未做任何改动）"
     print("\n=== %s ===" % title)
-    for cat in (DIVERGED, FAST_FORWARD, UNKNOWN, LOCAL_ONLY, ARCHIVED, IN_SYNC):
+    for cat in (REWRITE, DIVERGED, FAST_FORWARD, UNKNOWN, LOCAL_ONLY, ARCHIVED, IN_SYNC):
         items = groups.get(cat, [])
         if not items:
             continue
@@ -470,16 +655,22 @@ def print_plan(records, applied):
                 extra = " | " + r["error"]
             if r["result"]:
                 extra = " | " + r["result"]
+            elif r["category"] == REWRITE:
+                extra = " | 独有提交 %d 个均来自上游或同步噪声，无你的功能改动" % r["discarded_commits"]
             elif r["risk_files"]:
                 extra = " | 提示：双方改过 %d 个同名文件（不等于冲突）" % len(r["risk_files"])
+            elif r["discarded_commits"] and r["mine_commits"]:
+                extra = " | 含 %d 个可放弃的同步/废弃提交，因有你的功能改动故保守保留" % r["discarded_commits"]
             print("  - %-42s 上游 %-40s 落后 %-4s 自有 %-4s  %s%s" % (
                 r["name"], r["upstream"] or "-", r["behind_by"], r["ahead_by"],
                 ACTION[cat], extra))
     n_ff = len(groups.get(FAST_FORWARD, []))
     n_dv = len(groups.get(DIVERGED, []))
-    print("\n共 %d 个 fork；可直接快进 %d 个，需保留改动后合并 %d 个，其余 %d 个无需操作。" % (
-        len(records), n_ff, n_dv, len(records) - n_ff - n_dv))
-    if not applied and (n_ff or n_dv):
+    n_rw = len(groups.get(REWRITE, []))
+    print("\n共 %d 个 fork；可直接快进 %d 个，需保留改动后合并 %d 个，"
+          "需对齐上游 %d 个，其余 %d 个无需操作。" % (
+              len(records), n_ff, n_dv, n_rw, len(records) - n_ff - n_dv - n_rw))
+    if not applied and (n_ff or n_dv or n_rw):
         print("执行更新：python fork_updater.py --apply")
     if n_dv:
         print("分叉仓库若真发生内容冲突，默认安全停下并生成冲突处置指引；"
@@ -496,7 +687,7 @@ font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 .wrap{max-width:1140px;margin:0 auto}
 h1{font-size:26px;margin:0 0 6px;letter-spacing:-.4px}
 .meta{color:var(--muted);font-size:13px;margin-bottom:24px}
-.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:24px}
+.cards{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:24px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
 .card .n{font-size:27px;font-weight:650;line-height:1.2}.card .l{color:var(--muted);font-size:12px;margin-top:4px}
 .card.ff .n{color:var(--blue)}.card.dv .n{color:var(--amber)}.card.ok .n{color:var(--green)}
@@ -514,6 +705,7 @@ a.up{font-weight:400;color:#4b5563;font-size:12px}
 .t-diverged{background:var(--amberbg);color:var(--amber)}
 .t-fast_forward{background:var(--bluebg);color:var(--blue)}
 .t-local_only,.t-in_sync,.t-archived{background:var(--greybg);color:var(--grey)}
+.t-upstream_rewritten{background:var(--redbg);color:var(--red)}
 .t-unknown{background:var(--redbg);color:var(--red)}
 .res{background:var(--greenbg);color:var(--green);font-weight:600}
 .res.bad{background:var(--redbg);color:var(--red)}
@@ -521,6 +713,7 @@ code{background:#f1f2f5;padding:1px 6px;border-radius:5px;font-size:12px}
 ul{margin:6px 0 0;padding-left:20px}li{margin-bottom:5px;color:#39414d}
 .foot{color:var(--muted);font-size:12px;margin-top:14px}
 .row-diverged{background:#fffaf2}.row-fast_forward{background:#f7faff}
+.row-upstream_rewritten{background:#fff5f3}
 h3{font-size:13px;margin:18px 0 8px;color:#39414d}
 pre{background:#f6f7f9;border:1px solid var(--line);border-radius:8px;padding:12px 14px;
 overflow-x:auto;font:12px/1.6 Consolas,"Courier New",monospace;color:#26303d;white-space:pre}
@@ -550,6 +743,9 @@ def render_html(records, login, applied, path):
             result = '<span class="res%s">%s</span>' % (" bad" if bad else "", esc(r["result"]))
         if r["backup_ref"]:
             result += '<div class="sub">备份 %s</div>' % esc(r["backup_ref"])
+        if r["category"] == REWRITE:
+            result += ('<div class="risk">独有 %d 个提交都不是你的功能；将备份后对齐上游</div>'
+                       % r["discarded_commits"])
         if r["risk_files"]:
             result += ('<div class="risk">提示：双方改过 %d 个同名文件（不等于冲突）</div>'
                        % len(r["risk_files"]))
@@ -596,10 +792,52 @@ def render_html(records, login, applied, path):
 <h3>风险预检（双方改动文件的交集）</h3>%s
 </section>""" % (guides, risk_html)
 
+    rewrite_items = []
+    for r in [x for x in ordered if x["category"] == REWRITE]:
+        bad = [x for x in r["commit_origins"] if x["origin"].startswith("discarded")]
+        lis = "".join('<li><code>%s</code> %s · %s</li>' % (
+            esc(x["sha"]), esc(ORIGIN_LABEL.get(x["origin"], x["origin"])),
+            esc(x["message"])) for x in bad[:12])
+        rewrite_items.append(
+            '<li><strong>%s</strong>：%d 个可放弃提交、0 个你的功能提交，'
+            '将备份后对齐 <code>%s:%s</code><ul>%s</ul></li>' % (
+                esc(r["name"]), len(bad), esc(r["upstream"]),
+                esc(r["upstream_branch"]), lis))
+    mixed = [r for r in ordered if r["ownership_checked"]
+             and r["category"] != REWRITE and r["discarded_commits"]
+             and r["mine_commits"]]
+    mixed_items = "".join(
+        '<li><strong>%s</strong>：%d 个你的功能提交 + %d 个可放弃的同步/废弃提交。'
+        '为不丢功能，本次不会自动强推；若要清理历史可本地执行 '
+        '<code>git rebase --onto upstream/%s %s %s</code> 后 '
+        '<code>git push --force-with-lease origin %s</code>。</li>' % (
+            esc(r["name"]), r["mine_commits"], r["discarded_commits"],
+            esc(r["upstream_branch"]), esc(r["merge_base"][:10] or "<共同祖先>"),
+            esc(r["branch"]), esc(r["branch"])) for r in mixed)
+    rewrite_html = """<section><h2>上游历史重写 · 提交归属判定</h2>
+<div class="warn">fork 独有提交不再一律当成「我的改动」。脚本把上游作者写的提交、
+以及 GitHub 自动生成的同步合并提交识别为「上游已放弃」；只要有一个提交不是上游作者写的
+（你本人、第三方贡献者、本地提交），就一律当作你的功能保留。上游 force push / 回退掉的
+旧提交因此不会永久堆在 fork 里，而你的功能绝不会被丢掉。</div>
+<ul>
+<li><span class="policy">align（默认）</span>：独有提交全部可放弃时，先建 <code>backup/&lt;分支&gt;-before-rewrite-&lt;时间戳&gt;</code> 备份分支，再把分支对齐到上游 HEAD；可从备份恢复。</li>
+<li><span class="policy">keep</span>：<code>--on-rewrite keep</code>，兼容旧行为，不去对齐。</li>
+<li>混合情况（既有你的功能又有废弃提交）永不自动强推，只在下方给出人工 rebase 命令。</li>
+<li>身份判定基于上游默认分支最近 100 个提交的 login / author email / committer email；读不到上游历史时一律保守保留。</li>
+</ul>
+<h3>本次将对齐上游的仓库</h3>%s
+<h3>混合情况（保守保留）</h3>%s
+</section>""" % (
+        "<ul>%s</ul>" % "".join(rewrite_items) if rewrite_items
+        else '<p class="sub">本次没有需要对齐的仓库。</p>',
+        "<ul>%s</ul>" % mixed_items if mixed_items
+        else '<p class="sub">本次没有混合情况。</p>')
+
     cards = [
         ("", len(records), "fork 总数"),
         ("ff", len(groups.get(FAST_FORWARD, [])), "可直接快进"),
         ("dv", len(groups.get(DIVERGED, [])), "需保留改动后合并"),
+        ("", len(groups.get(REWRITE, [])), "需对齐上游"),
         ("", len(groups.get(LOCAL_ONLY, [])) + len(groups.get(IN_SYNC, [])), "无需操作"),
         ("ok", sum(1 for r in records if r["result"].startswith(("已更新", "已按 upstream"))), "本次已更新"),
     ]
@@ -616,9 +854,11 @@ def render_html(records, login, applied, path):
 <section><h2>更新规则</h2><ul>
 <li><strong>无自有提交、上游有更新</strong>：直接快进（GitHub Sync fork / merge-upstream），无需人工介入。</li>
 <li><strong>有自有提交、上游也有更新</strong>：先创建 <code>backup/&lt;分支&gt;-before-upstream-&lt;时间戳&gt;</code> 备份分支，再合并上游生成合并提交，你的提交完整保留；若服务端合并冲突，fork 保持原样，保留备份并给出解决步骤。</li>
+<li><strong>上游重写了历史</strong>：若 fork 独有提交全部是上游作者写的旧提交或 GitHub 自动同步合并提交，先备份再对齐上游，同步放弃这些已被上游剔除的提交；只要含你的功能提交就绝不自动强推。</li>
 <li><strong>上游无更新或已同步</strong>：完全不动。已归档仓库跳过。</li>
-<li>默认路径不使用 force push，不删除任何分支或提交（仅 <code>--on-conflict upstream</code> 例外）；凭据仅在运行时从环境变量或 Git Credential Manager 读取。</li>
+<li>默认路径不使用 force push（仅 <code>--on-conflict upstream</code> 与「对齐上游」例外），不删除任何分支或提交；凭据仅在运行时从环境变量或 Git Credential Manager 读取。</li>
 </ul></section>
+%s
 %s
 <section><h2>逐仓库明细</h2><table><thead><tr><th>你的仓库</th><th>上游</th><th>上游新增</th><th>自有提交</th><th>结论</th><th>建议动作 / 结果</th></tr></thead>
 <tbody>%s</tbody></table>
@@ -629,8 +869,10 @@ def render_html(records, login, applied, path):
 <li><code>python fork_updater.py --apply --yes</code> —— 无人值守执行（适合计划任务）</li>
 <li><code>--only A,B</code> / <code>--exclude A,B</code> —— 限定或排除仓库；<code>--json plan.json</code> 导出机器可读结果</li>
 <li><code>--on-conflict keep|skip|upstream</code> —— 冲突策略，默认 <code>keep</code>；发生冲突时会另外生成 <code>conflict-guide.md</code></li>
+<li><code>--on-rewrite align|keep</code> —— 上游重写历史时的策略，默认 <code>align</code>（备份后对齐上游）</li>
 </ul></section></div></body></html>""" % (
-        esc(login), CSS, esc(login), esc(mode), now, card_html, conflict_html, "\n".join(tr))
+        esc(login), CSS, esc(login), esc(mode), now, card_html, conflict_html,
+        rewrite_html, "\n".join(tr))
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)
     return path
@@ -655,6 +897,11 @@ def main():
                          "upstream 备份后强制对齐上游（丢弃自有改动，危险）")
     ap.add_argument("--no-precheck", action="store_true",
                     help="关闭分叉仓库的冲突风险预检（可少发几次 API 请求）")
+    ap.add_argument("--on-rewrite", choices=REWRITE_POLICIES, default=REWRITE_ALIGN,
+                    help="上游重写历史时的策略：align 备份后对齐上游、放弃被上游剔除的旧提交"
+                         "（默认）/ keep 一律保留旧历史")
+    ap.add_argument("--no-ownership", action="store_true",
+                    help="关闭 fork 独有提交的来源分析（可少发 API 请求，此时不会做对齐）")
     ap.add_argument("--guide", default=DEFAULT_GUIDE, help="冲突处置指引输出路径")
     args = ap.parse_args()
 
@@ -670,6 +917,12 @@ def main():
         records = list(ex.map(lambda f: analyze(gh, login, f), forks))
     records.sort(key=lambda r: (ORDER[r["category"]], r["name"].lower()))
 
+    n_ahead = sum(1 for r in records if r["ahead_by"]
+                  and r["category"] in (LOCAL_ONLY, DIVERGED))
+    if n_ahead and not args.no_ownership:
+        print("发现 %d 个仓库有 fork 独有提交，正在判定提交来源…" % n_ahead)
+        analyze_ownership(gh, login, records)
+
     n_dv_pre = sum(1 for r in records if r["category"] == DIVERGED)
     if n_dv_pre and not args.no_precheck:
         print("发现 %d 个分叉仓库，正在预检双方改动文件…" % n_dv_pre)
@@ -677,12 +930,17 @@ def main():
 
     n_ff = sum(1 for r in records if r["category"] == FAST_FORWARD)
     n_dv = sum(1 for r in records if r["category"] == DIVERGED)
+    n_rw = sum(1 for r in records if r["category"] == REWRITE)
     print_plan(records, applied=False)
 
-    if args.apply and (n_ff or n_dv):
+    n_rw_action = n_rw if args.on_rewrite == REWRITE_ALIGN else 0
+    if args.apply and (n_ff or n_dv or n_rw_action):
         if not args.yes:
-            print("\n即将更新 %d 个仓库（快进 %d / 保留改动后合并 %d），冲突策略：%s。" % (
-                n_ff + n_dv, n_ff, n_dv, args.on_conflict))
+            print("\n即将更新 %d 个仓库（快进 %d / 保留改动后合并 %d / 对齐上游 %d），冲突策略：%s。" % (
+                n_ff + n_dv + n_rw_action, n_ff, n_dv, n_rw_action, args.on_conflict))
+            if n_rw_action:
+                print("注意：其中 %d 个仓库将先建备份分支，再对齐上游并放弃被上游剔除的旧提交"
+                      "（已确认不含你的功能改动）。" % n_rw_action)
             if args.on_conflict == CONFLICT_UPSTREAM:
                 print("⚠ upstream 策略会在冲突时丢弃全部自有提交（备份分支可恢复），请确认已知晓。")
                 answer = input('确认请输入 UPSTREAM（区分大小写），否则取消: ').strip()
@@ -697,7 +955,7 @@ def main():
         if args.apply:
             stamp = datetime.now().strftime("%Y%m%d-%H%M")
             print("\n=== 开始更新 ===")
-            apply_updates(gh, login, records, stamp, args.on_conflict)
+            apply_updates(gh, login, records, stamp, args.on_conflict, args.on_rewrite)
             print_plan(records, applied=True)
             guide = write_conflict_guide(records, args.guide)
             if guide:
@@ -711,8 +969,9 @@ def main():
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump({"login": login, "generated_at": datetime.now().isoformat(),
-                       "applied": bool(args.apply and (n_ff or n_dv)),
-                       "on_conflict": args.on_conflict, "forks": records},
+                       "applied": bool(args.apply and (n_ff or n_dv or n_rw_action)),
+                       "on_conflict": args.on_conflict,
+                       "on_rewrite": args.on_rewrite, "forks": records},
                       f, ensure_ascii=False, indent=2)
         print("JSON 结果：%s" % args.json)
 

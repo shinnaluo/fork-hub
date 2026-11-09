@@ -49,8 +49,8 @@ WEBHOOK = os.environ.get("NOTIFY_WEBHOOK", "").strip()
 MENTION = os.environ.get("NOTIFY_MENTION", "").strip() or OWNER
 LABEL = "fork-sync"
 
-UPDATED_PREFIX = ("已更新", "已按 upstream")
-PENDING_CATEGORIES = ("fast_forward", "diverged")
+UPDATED_PREFIX = ("已更新", "已按 upstream", "已对齐")
+PENDING_CATEGORIES = ("fast_forward", "diverged", "upstream_rewritten")
 
 
 def api(method, path, payload=None):
@@ -168,7 +168,10 @@ def build_message(mode, d, err, s):
                   "| 仓库 | 处理方式 | 备份分支 | 复核落后上游 | 自有提交 |",
                   "| --- | --- | --- | --- | --- |"]
         for r in sorted(s["updated"], key=lambda x: x.get("name", "").lower()):
-            kind = "直接快进" if r.get("category") == "fast_forward" else "保留改动后合并"
+            kind = ("直接快进" if r.get("category") == "fast_forward"
+                    else "对齐上游（放弃废弃提交）"
+                    if r.get("category") == "upstream_rewritten"
+                    else "保留改动后合并")
             behind = r.get("behind_after")
             verify = "0（已追平）" if behind == 0 else str(behind)
             lines.append("| `%s` | %s | %s | %s | %s |" % (
@@ -180,7 +183,9 @@ def build_message(mode, d, err, s):
                   "| 仓库 | 上游新增 | 自有提交 | 处理方式 |",
                   "| --- | --- | --- | --- |"]
         for r in sorted(s["pending"], key=lambda x: x.get("name", "").lower()):
-            kind = "直接快进" if r.get("category") == "fast_forward" else "先备份再合并"
+            kind = ("直接快进" if r.get("category") == "fast_forward"
+                    else "备份后对齐上游" if r.get("category") == "upstream_rewritten"
+                    else "先备份再合并")
             lines.append("| `%s` | %s | %s | %s |" % (
                 r.get("name", ""), r.get("behind_by"), r.get("ahead_by"), kind))
         lines.append("")

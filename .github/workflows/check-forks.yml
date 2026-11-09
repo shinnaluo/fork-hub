@@ -23,6 +23,11 @@
 #     NOTIFY_SCOPE = final（默认，全自动时只推 apply 的最终结果一条）| both
 #     NOTIFY_LEVEL = all（默认，每次自检都推）| changes（只在有变化/异常时推）
 #     NOTIFY_MENTION = 要 @ 的用户名，填 none 可关闭
+#
+# 上游重写历史：fork_updater.py 会按提交作者识别「上游已放弃的旧提交」与
+#   「你的功能提交」。独有提交全属前者时归类 upstream_rewritten，由 apply 工作流
+#   备份后对齐上游；含你的功能提交时一律保守保留。默认策略 align，可在
+#   Settings -> Variables 设 ON_REWRITE=keep 关闭（仅影响 apply 工作流）。
 name: check forks
 
 on:
@@ -74,7 +79,8 @@ jobs:
           python - <<'PY'
           import json, os
           d = json.load(open("plan.json", encoding="utf-8"))
-          n = sum(1 for r in d["forks"] if r["category"] in ("fast_forward", "diverged"))
+          n = sum(1 for r in d["forks"] if r["category"] in
+                  ("fast_forward", "diverged", "upstream_rewritten"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write("pending=%d\n" % n)
           print("pending updates:", n)

@@ -9,6 +9,8 @@
 # 结果推送：本工作流在结束时调用 notify.py，把「是否保留自有改动、备份分支、
 #   复核落后数、冲突与解决命令」推到状态 Issue 并 @mention，触发站内/邮件通知；
 #   同时可选推送到 NOTIFY_WEBHOOK（见 check-forks.yml 顶部说明）。
+# 上游重写历史默认策略 align：独有提交全是被上游放弃的旧提交时，备份后对齐上游；
+#   含你的功能提交时绝不自动强推。可用 Settings -> Variables 的 ON_REWRITE=keep 关闭。
 name: apply fork updates
 
 on:
@@ -77,9 +79,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
           ON_CONFLICT: ${{ inputs.on_conflict }}
+          ON_REWRITE: ${{ vars.ON_REWRITE }}
           ONLY: ${{ inputs.only }}
         run: |
           args=(--apply --yes --on-conflict "$ON_CONFLICT")
+          if [ -n "$ON_REWRITE" ]; then args+=(--on-rewrite "$ON_REWRITE"); fi
           if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
           python fork_updater.py "${args[@]}" --json result.json \
             --report fork-update-report.html --guide conflict-guide.md
@@ -108,7 +112,8 @@ jobs:
           forks = d.get("forks", [])
           conflicts = [r for r in forks if r.get("conflict")]
           updated = [r for r in forks
-                     if r.get("result", "").startswith(("已更新", "已按 upstream"))]
+                     if r.get("result", "").startswith(
+                         ("已更新", "已按 upstream", "已对齐"))]
           lines = ["## Fork 同步结果", "",
                    "- 已更新：**%d**" % len(updated),
                    "- 需人工处理冲突：**%d**" % len(conflicts), ""]
