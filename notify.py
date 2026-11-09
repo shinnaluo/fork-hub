@@ -134,6 +134,13 @@ def build_message(mode, d, err, s):
             title = "Fork 自检完成：全部已同步（%d 个 fork）" % s["total"]
             conclusion = "所有仓库已与上游一致，或仅含你的改动而上游无新提交，本次无写操作。"
 
+    # apply 的 result.json 里 category 仍是更新前的分类，直接显示「待更新 2」会让人
+    # 误以为没更新完；这里显示真正还没处理完的数量。
+    remain = [r for r in s["pending"]
+              if not r.get("result", "").startswith(UPDATED_PREFIX) and not r.get("conflict")]
+    pending_label = "待更新（本次检出）" if mode == "check" else "更新后仍待更新"
+    pending_value = n_pending if mode == "check" else len(remain)
+
     mention = "@%s " % MENTION if MENTION and MENTION.lower() not in ("none", "false", "0") else ""
     lines = [
         "### Fork %s结果 · %s（北京时间）" % (label, beijing_time()),
@@ -144,7 +151,7 @@ def build_message(mode, d, err, s):
         "| --- | --- |",
         "| 运行状态 | %s |" % ("成功" if JOB_STATUS == "success" else JOB_STATUS),
         "| fork 总数 | %d |" % s["total"],
-        "| 待更新 | %d |" % n_pending,
+        "| %s | %d |" % (pending_label, pending_value),
         "| 本次已更新 | %d |" % n_updated,
         "| 需人工处理冲突 | %d |" % n_conflict,
         "| 仅含自有改动（未动） | %d |" % len(s["local_only"]),
