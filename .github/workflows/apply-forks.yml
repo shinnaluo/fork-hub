@@ -6,6 +6,9 @@
 #
 # 想全自动：不要在这里加 schedule，而是在 Settings -> Variables 设 AUTO_APPLY=true，
 # 由 check 工作流在确认有待更新项时才触发本工作流，避免每天无谓地写所有 fork。
+# 结果推送：本工作流在结束时调用 notify.py，把「是否保留自有改动、备份分支、
+#   复核落后数、冲突与解决命令」推到状态 Issue 并 @mention，触发站内/邮件通知；
+#   同时可选推送到 NOTIFY_WEBHOOK（见 check-forks.yml 顶部说明）。
 name: apply fork updates
 
 on:
@@ -137,3 +140,17 @@ jobs:
             conflict-guide.md
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Push the update result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MODE: apply
+          DATA_PATH: result.json
+          JOB_STATUS: ${{ job.status }}
+          NOTIFY_SCOPE: ${{ vars.NOTIFY_SCOPE }}
+          NOTIFY_LEVEL: ${{ vars.NOTIFY_LEVEL }}
+          NOTIFY_MENTION: ${{ vars.NOTIFY_MENTION }}
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+        run: python notify.py

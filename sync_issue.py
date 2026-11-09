@@ -272,10 +272,16 @@ def main():
     title = ALERT_TITLE % unresolved if unresolved else TITLE
 
     if not need_open:
-        if cur and cur.get("state") == "open":
+        # 即使没有待办，也要刷新正文里的「本次检查时间」，否则关闭后的 Issue
+        # 会永远停在最后一次有待更新时的状态，看不出今天到底自检过没有。
+        # PATCH body 不会重开 Issue；通知由 notify.py 的评论单独负责。
+        if cur:
+            if body.strip() == old_body.strip():
+                print("无待更新项，Issue #%d 正文已是最新，无需写入" % cur["number"])
+                return
             st, _ = call("PATCH", "/repos/%s/issues/%d" % (REPO, cur["number"]),
                          {"state": "closed", "title": title, "body": body})
-            print("无待更新项、无未解决冲突，已关闭 Issue #%d，HTTP %s" % (cur["number"], st))
+            print("无待更新项，已刷新 Issue #%d 正文并保持关闭，HTTP %s" % (cur["number"], st))
         else:
             print("无待更新项，无需操作")
         return

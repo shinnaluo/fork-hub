@@ -15,6 +15,14 @@
 #   纯本地：不用本仓库，直接跑 fork-sync/fork_updater.py。
 # 注意：用 GITHUB_ENV 写的变量不进 step 的 env context，因此计数走 step output，
 #       不能用 if: env.PENDING != '0' 判断（恒为真会误触发更新）。
+#
+# 结果推送：每次自检由 notify.py 在状态 Issue 发一条带 @mention 的评论，
+#   触发 GitHub 站内/邮件通知。可选 Settings -> Secrets 添加 NOTIFY_WEBHOOK
+#   （Server酱 / Bark / 企业微信 / 钉钉 / 飞书 / 通用 JSON，按 URL 自动适配）。
+#   可选 Settings -> Variables：
+#     NOTIFY_SCOPE = final（默认，全自动时只推 apply 的最终结果一条）| both
+#     NOTIFY_LEVEL = all（默认，每次自检都推）| changes（只在有变化/异常时推）
+#     NOTIFY_MENTION = 要 @ 的用户名，填 none 可关闭
 name: check forks
 
 on:
@@ -81,6 +89,7 @@ jobs:
         run: python sync_issue.py
 
       - name: Optionally trigger the apply workflow
+        id: dispatch
         if: >-
           ${{ steps.count.outputs.pending != '0' &&
               (inputs.auto_apply == true || inputs.auto_apply == 'true' ||
@@ -103,6 +112,8 @@ jobs:
                        "User-Agent": "fork-hub"})
           with urllib.request.urlopen(req, timeout=30) as r:
               print("apply workflow dispatched, HTTP", r.status)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("dispatched=true\n")
           PY
 
       - uses: actions/upload-artifact@v4
@@ -112,3 +123,18 @@ jobs:
             plan.json
             fork-report.html
           retention-days: 14
+
+      - name: Push the self-check result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MODE: check
+          DATA_PATH: plan.json
+          JOB_STATUS: ${{ job.status }}
+          APPLY_DISPATCHED: ${{ steps.dispatch.outputs.dispatched }}
+          NOTIFY_SCOPE: ${{ vars.NOTIFY_SCOPE }}
+          NOTIFY_LEVEL: ${{ vars.NOTIFY_LEVEL }}
+          NOTIFY_MENTION: ${{ vars.NOTIFY_MENTION }}
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+        run: python notify.py
