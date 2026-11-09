@@ -34,10 +34,10 @@
 
 早期版本把 fork 上所有独有提交一律当成「我的改动」，结果上游 `force push` / rebase 掉的旧提交会在 fork 里变成永久累赘。现在改为按提交作者来源判定：
 
-1. 读取**上游默认分支最近 100 个提交**，把 `login` / `author email` / `committer email` 汇成「上游作者集合」（排除 `noreply@github.com`、`web-flow@` 等平台通用身份）。
+1. 读取**上游默认分支最近 100 个提交**，把 `login` / `author email` / `committer email` 汇成「上游作者集合」（排除 `noreply@github.com`、`web-flow@` 等平台通用身份，并强制剔除本账号 login，避免你曾给上游提过提交时把自己误判成上游作者）。
 2. 逐个检查 fork 独有提交：
    - 作者命中上游作者集合 → `discarded_upstream`（上游已放弃的旧提交）
-   - `Merge branch ...` / `Merge upstream ...` 等 GitHub 自动生成的同步合并提交 → `discarded_sync`（同步噪声）
+   - GitHub 自动生成的 Sync fork 合并提交（双亲、平台 committer、`Merge branch ...` 等）→ `discarded_sync`（同步噪声）
    - **其他一律判为 `mine`（你的功能提交），保守保留**
 3. 只有 `mine` 数量为 0 且被放弃的提交数大于 0 时，才归类 `upstream_rewritten` 并允许对齐；只要有 1 个 `mine`，就不强推。
 
