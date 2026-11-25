@@ -13,8 +13,8 @@
   3. GITHUB_STEP_SUMMARY，Actions 页面上直接可见。
 
 环境变量（由工作流注入）：
-  MODE=check|apply          本次是自检还是更新
-  DATA_PATH=plan.json|result.json
+  MODE=check|apply|release  本次是自检、更新还是打包发布
+  DATA_PATH=plan.json|result.json|release.json
   JOB_STATUS                ${{ job.status }}
   APPLY_DISPATCHED          check 是否已自动派发 apply（用于避免重复通知）
   NOTIFY_SCOPE=final|both   final（默认）：已派发 apply 时 check 不推，只推最终结果一条
@@ -80,8 +80,9 @@ def load_data():
     try:
         with open(DATA_PATH, encoding="utf-8") as f:
             d = json.load(f)
-        if not isinstance(d, dict) or not isinstance(d.get("forks"), list):
-            return None, "%s 格式不正确（缺少 forks 数组）" % DATA_PATH
+        if not isinstance(d, dict) or not (
+                isinstance(d.get("forks"), list) or isinstance(d.get("releases"), list)):
+            return None, "%s 格式不正确（缺少 forks / releases 数组）" % DATA_PATH
         return d, ""
     except Exception as e:
         return None, "读取 %s 失败：%s" % (DATA_PATH, e)
@@ -96,7 +97,23 @@ def run_url():
 
 
 def stats(d):
-    forks = (d or {}).get("forks", [])
+    data = d or {}
+    releases = data.get("releases")
+    if isinstance(releases, list):
+        failed = [r for r in releases if r.get("status") != "success"]
+        return {
+            "mode": "release",
+            "releases": releases,
+            "failed": failed,
+            "total": len(releases),
+            "pending": [],
+            "updated": [r for r in releases if r.get("status") == "success"],
+            "conflicts": failed,
+            "local_only": [],
+            "in_sync": [],
+            "risky": [],
+        }
+    forks = data.get("forks", [])
     return {
         "forks": forks,
         "total": len(forks),
@@ -109,8 +126,70 @@ def stats(d):
     }
 
 
+def build_release_message(d, err):
+    """打包发布专用消息：只汇总 Release 结果，不套用 fork 同步的统计口径。"""
+    data = d or {}
+    rows = data.get("releases", [])
+    success = sum(1 for r in rows if r.get("status") == "success")
+    failed = len(rows) - success
+    bad = bool(err) or JOB_STATUS != "success" or bool(failed)
+    version = data.get("version", "")
+    dry_run = bool(data.get("dry_run"))
+
+    if bad:
+        title = "Fork 打包发布异常：%d 个失败" % failed
+        conclusion = "部分目标未发布成功，请以 Actions 日志与 release.json 为准。"
+    else:
+        title = "Fork 打包发布完成：%d 个成功" % success
+        conclusion = ("dry-run 已完成，仅在 Artifact 里生成资产，未写入任何仓库。"
+                      if dry_run else "Release 与资产已发布到对应 fork。")
+
+    mention = "@%s " % MENTION if MENTION and MENTION.lower() not in ("none", "false", "0") else ""
+    lines = [
+        "### Fork 打包发布结果 · %s（北京时间）" % beijing_time(),
+        "",
+        "%s本次由 `release forks` 工作流推送。" % mention,
+        "",
+        "| 项目 | 数值 |",
+        "| --- | --- |",
+        "| 运行状态 | %s |" % ("成功" if JOB_STATUS == "success" else JOB_STATUS),
+        "| 目标数 | %d |" % len(rows),
+        "| 成功发布 | %d |" % success,
+        "| 失败 | %d |" % failed,
+        "| 版本 | `%s` |" % version,
+        "| 模式 | %s |" % ("dry-run" if dry_run else "正式发布"),
+        "",
+        "结论：%s" % conclusion,
+        "",
+    ]
+    if err:
+        lines += ["> 数据读取异常：%s" % err, ""]
+    if rows:
+        lines += ["| 仓库 | 类型 | 标签 | 资产 | 状态 |",
+                  "| --- | --- | --- | --- | --- |"]
+        for item in rows:
+            lines.append("| `%s` | %s | `%s` | %s | %s |" % (
+                item.get("repo", ""), item.get("kind", "-"),
+                item.get("tag", "-") or "-",
+                ", ".join(item.get("assets", [])) or "-",
+                "成功" if item.get("status") == "success" else
+                "失败：%s" % str(item.get("error", ""))[:120]))
+        lines.append("")
+    if run_url():
+        lines += ["[查看本次运行日志](%s) ｜ [状态 Issue](%s/%s/issues?q=label%%3A%s)" % (
+            run_url(), SERVER, REPO, LABEL), ""]
+    lines += ["<sub>由 fork-hub 自动推送 · run #%s · attempt %s · 通知级别 %s</sub>" % (
+        RUN_NUMBER or "?", RUN_ATTEMPT or "?", LEVEL)]
+    markdown = "\n".join(lines)
+    plain = re.sub(r"[|#*`\[\]<>]", "", markdown)
+    plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
+    return title, markdown, plain
+
+
 def build_message(mode, d, err, s):
     """返回 (标题, Markdown 正文, 纯文本正文)。"""
+    if mode == "release":
+        return build_release_message(d, err)
     bad = JOB_STATUS != "success" or bool(err)
     label = "自检" if mode == "check" else "更新"
     n_pending, n_updated, n_conflict = len(s["pending"]), len(s["updated"]), len(s["conflicts"])
@@ -214,6 +293,12 @@ def build_message(mode, d, err, s):
 
 def should_skip(mode, err, s):
     """返回 (是否跳过, 原因)。失败与冲突永远不静默。"""
+    if mode == "release":
+        if err or JOB_STATUS != "success" or s.get("failed"):
+            return False, ""
+        if LEVEL == "changes" and not s.get("releases"):
+            return True, "本次没有发布目标，NOTIFY_LEVEL=changes 已静默"
+        return False, ""
     bad = JOB_STATUS != "success" or bool(err) or bool(s["conflicts"])
     if SCOPE != "both" and mode == "check" and APPLY_DISPATCHED == "true" and not bad:
         return True, "已自动派发 apply，最终通知由 apply 工作流发出（NOTIFY_SCOPE=final）"
@@ -304,8 +389,8 @@ def write_summary(title, markdown, skipped_reason, delivered):
 
 
 def main():
-    if MODE not in ("check", "apply"):
-        raise SystemExit("MODE 只能是 check 或 apply，当前为 %r" % MODE)
+    if MODE not in ("check", "apply", "release"):
+        raise SystemExit("MODE 只能是 check / apply / release，当前为 %r" % MODE)
     d, err = load_data()
     s = stats(d)
     title, markdown, plain = build_message(MODE, d, err, s)

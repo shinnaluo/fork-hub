@@ -1,0 +1,32 @@
+{
+  "owner": "shinnaluo",
+  "branch": "main",
+  "tag_pattern": "{repo}-v{version}",
+  "exclude": ["**/__pycache__/**", "*.pyc", "**/.DS_Store", "*.log"],
+  "targets": [
+    {
+      "repo": "ha-chuanglvjia",
+      "kind": "ha-integration",
+      "path": "custom_components/chuanglvjia",
+      "branch": "main"
+    },
+    {
+      "repo": "XiaomiGateway3",
+      "kind": "ha-integration",
+      "path": "custom_components/xiaomi_gateway3",
+      "branch": "master"
+    },
+    {
+      "repo": "magisk-tailscaled",
+      "kind": "module",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "mi-gpt",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    }
+  ]
+}

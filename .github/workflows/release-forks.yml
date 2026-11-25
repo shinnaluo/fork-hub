@@ -1,0 +1,148 @@
+# fork-hub 控制中心 · 自动打包发布 Release（只创建 Release 与资产，不改分支/提交）
+# 前提：沿用 apply 工作流的 FORK_SYNC_PAT（需要 Contents read/write，能写目标 fork 的 Releases）。
+# 手动：Actions -> release forks -> Run workflow，可指定仓库、版本、dry_run、force。
+# 自动：
+#   1) Settings -> Secrets and variables -> Actions -> Variables 设 AUTO_RELEASE=true，
+#      每天 UTC 02:27（北京时间 10:27，排在自检之后）自动打包 release-targets.json 里的全部目标；
+#   2) AUTO_RELEASE=true 且 AUTO_APPLY=true 时，apply 工作流会把本次实际更新的仓库
+#      通过 workflow_dispatch 传给本工作流，只发布真正有更新的 fork。
+# dry_run=true 只打包到 dist/ 产物，不写任何仓库，可直接验收 HACS / Magisk 目录结构。
+name: release forks
+
+on:
+  schedule:
+    - cron: "27 2 * * *"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma separated repo names; blank means all targets in release-targets.json"
+        required: false
+        default: ""
+        type: string
+      version:
+        description: "Version like 1.2.3; blank means UTC timestamp"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Only build assets locally, do not create releases"
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: "Update the release and overwrite same-name assets when the tag exists"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fork-hub-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 打包并发布
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'schedule' || vars.AUTO_RELEASE == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify the release PAT
+        if: ${{ inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          token = os.environ.get("GH_TOKEN", "")
+          if not token:
+              raise SystemExit("缺少 FORK_SYNC_PAT：无法创建 Release")
+          req = urllib.request.Request(
+              "https://api.github.com/user",
+              headers={"Authorization": "Bearer " + token,
+                       "Accept": "application/vnd.github+json",
+                       "User-Agent": "fork-hub-release"})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              user = json.load(r)
+          print("PAT owner:", user.get("login"))
+          print("提示：该 PAT 需要对目标 fork 拥有 Contents read/write 权限。")
+          PY
+
+      - name: Build packages and publish releases
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+          ONLY: ${{ inputs.only }}
+          VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          args=()
+          if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
+          if [ -n "$VERSION" ]; then args+=(--version "$VERSION"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          python release_builder.py "${args[@]}" --json release.json
+
+      - name: Write release summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if not path:
+              raise SystemExit(0)
+          try:
+              d = json.load(open("release.json", encoding="utf-8"))
+          except Exception as error:
+              with open(path, "a", encoding="utf-8") as f:
+                  f.write("## 打包发布结果\n\n未读取到 release.json：%s\n" % error)
+              raise SystemExit(0)
+          rows = d.get("releases", [])
+          lines = ["## 打包发布结果", "",
+                   "- 版本：`%s`" % d.get("version", ""),
+                   "- 模式：%s" % ("dry-run（未写入仓库）" if d.get("dry_run") else "正式发布"), ""]
+          for item in rows:
+              mark = "成功" if item.get("status") == "success" else "失败"
+              lines.append("- **%s** `%s` %s ｜ 标签 `%s` ｜ 资产 %s" % (
+                  mark, item.get("repo", ""), item.get("kind", ""),
+                  item.get("tag", "") or "-", ", ".join(item.get("assets", [])) or "-"))
+              if item.get("url"):
+                  lines.append("  - %s" % item["url"])
+              if item.get("error"):
+                  lines.append("  - 错误：%s" % item["error"])
+          with open(path, "a", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload release artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-${{ github.run_number }}
+          path: |
+            release.json
+            dist/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Push the release result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MODE: release
+          DATA_PATH: release.json
+          JOB_STATUS: ${{ job.status }}
+          NOTIFY_SCOPE: ${{ vars.NOTIFY_SCOPE }}
+          NOTIFY_LEVEL: ${{ vars.NOTIFY_LEVEL }}
+          NOTIFY_MENTION: ${{ vars.NOTIFY_MENTION }}
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+        run: python notify.py

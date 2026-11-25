@@ -11,7 +11,10 @@
   python dispatch.py apply                    # 触发更新（默认 keep 策略）
   python dispatch.py apply --only BiliPai --on-conflict skip
   python dispatch.py apply --fail-on-conflict # 真冲突时让 run 标红并给通知
-  python dispatch.py runs                     # 查看两个工作流最近的运行
+  python dispatch.py release                  # 打包并发布所有配置的 fork Release
+  python dispatch.py release --only ha-chuanglvjia --version 1.2.3
+  python dispatch.py release --dry-run        # 只打包到本地，不写任何仓库
+  python dispatch.py runs                     # 查看三个工作流最近的运行
 
 更新结果（是否保留你的提交、备份分支、复核落后数、冲突解决命令）
 会自动写回 hub 仓库的「Fork 同步状态」Issue，不必下载 artifact 就能看到。
@@ -27,6 +30,7 @@ from fork_updater import get_token
 API = "https://api.github.com"
 CHECK = "check-forks.yml"
 APPLY = "apply-forks.yml"
+RELEASE = "release-forks.yml"
 DEFAULT_REPO = os.environ.get("FORK_HUB_REPO", "shinnaluo/fork-hub")
 
 
@@ -66,7 +70,7 @@ def dispatch(token, repo, workflow, ref, inputs):
 
 
 def show_runs(token, repo):
-    for wf in (CHECK, APPLY):
+    for wf in (CHECK, APPLY, RELEASE):
         path = "/repos/%s/actions/workflows/%s/runs?per_page=5" % (repo, wf)
         st, d = call(token, "GET", path)
         print("\n=== %s ===" % wf)
@@ -84,7 +88,7 @@ def show_runs(token, repo):
 
 def main():
     ap = argparse.ArgumentParser(description="触发 fork-hub 云端工作流（本地不写仓库）")
-    ap.add_argument("command", choices=["check", "apply", "runs"])
+    ap.add_argument("command", choices=["check", "apply", "release", "runs"])
     ap.add_argument("--repo", default=DEFAULT_REPO, help="hub 仓库 owner/name")
     ap.add_argument("--ref", default="main", help="工作流所在分支，默认 main")
     ap.add_argument("--on-conflict", choices=["keep", "skip", "upstream"], default="keep")
@@ -93,6 +97,11 @@ def main():
                     help="仅 check 有效：有待更新项时自动触发 apply")
     ap.add_argument("--fail-on-conflict", action="store_true",
                     help="仅 apply 有效：真冲突时让 run 标红（方便收到通知）")
+    ap.add_argument("--version", default="", help="仅 release 有效：版本号，留空用 UTC 时间戳")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="仅 release 有效：只打包，不创建 Release")
+    ap.add_argument("--force", action="store_true",
+                    help="仅 release 有效：标签已存在时更新 Release 并覆盖同名资产")
     args = ap.parse_args()
 
     token = get_token()
@@ -102,6 +111,13 @@ def main():
         return dispatch(token, args.repo, CHECK, args.ref, {
             "only": args.only,
             "auto_apply": "true" if args.auto_apply else "false",
+        })
+    if args.command == "release":
+        return dispatch(token, args.repo, RELEASE, args.ref, {
+            "only": args.only,
+            "version": args.version,
+            "dry_run": "true" if args.dry_run else "false",
+            "force": "true" if args.force else "false",
         })
     if args.on_conflict == "upstream":
         print("警告：upstream 策略会在冲突时丢弃你的自有提交（备份分支可恢复）。")

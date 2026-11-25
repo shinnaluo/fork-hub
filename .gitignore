@@ -5,3 +5,6 @@ result.json
 fork-report.html
 fork-update-report.html
 conflict-guide.md
+dist/
+release.json
+release-test.json

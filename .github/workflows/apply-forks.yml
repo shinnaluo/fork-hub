@@ -38,6 +38,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: write
 
 concurrency:
   group: fork-hub-apply
@@ -87,6 +88,46 @@ jobs:
           if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
           python fork_updater.py "${args[@]}" --json result.json \
             --report fork-update-report.html --guide conflict-guide.md
+
+      - name: Dispatch release workflow for updated forks
+        id: release_dispatch
+        if: ${{ vars.AUTO_RELEASE == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          RESULT_PATH: result.json
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          try:
+              data = json.load(open(os.environ["RESULT_PATH"], encoding="utf-8"))
+              names = [r.get("name") for r in data.get("forks", [])
+                       if str(r.get("result", "")).startswith(("已更新", "已按 upstream", "已对齐"))]
+              names = [n for n in names if n]
+          except Exception as error:
+              print("无法读取更新结果，跳过发布派发：%s" % error)
+              names = []
+          if not names:
+              print("本次没有实际更新的 fork，跳过发布派发。")
+              raise SystemExit(0)
+          payload = {
+              "ref": os.environ["REF"],
+              "inputs": {"only": ",".join(sorted(set(names))),
+                         "version": "", "dry_run": "false", "force": "false"},
+          }
+          url = "https://api.github.com/repos/%s/actions/workflows/release-forks.yml/dispatches" % os.environ["GITHUB_REPOSITORY"]
+          req = urllib.request.Request(
+              url, data=json.dumps(payload).encode(), method="POST",
+              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json",
+                       "User-Agent": "fork-hub"})
+          with urllib.request.urlopen(req, timeout=30) as response:
+              print("release-forks.yml 已派发，HTTP", response.status)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("dispatched=true\n")
+          PY
 
       - name: Maintain the status issue (result)
         if: always()
