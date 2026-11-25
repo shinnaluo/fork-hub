@@ -2,7 +2,12 @@
   "owner": "shinnaluo",
   "branch": "main",
   "tag_pattern": "{repo}-v{version}",
-  "exclude": ["**/__pycache__/**", "*.pyc", "**/.DS_Store", "*.log"],
+  "exclude": [
+    "**/__pycache__/**",
+    "*.pyc",
+    "**/.DS_Store",
+    "*.log"
+  ],
   "targets": [
     {
       "repo": "ha-chuanglvjia",
@@ -17,13 +22,133 @@
       "branch": "master"
     },
     {
+      "repo": "ha-dangbei",
+      "kind": "ha-integration",
+      "path": "custom_components/dangbei",
+      "branch": "main"
+    },
+    {
+      "repo": "ha-desmanlock",
+      "kind": "ha-integration",
+      "path": "custom_components/desmanlock",
+      "branch": "master"
+    },
+    {
+      "repo": "HA-Housekeeper",
+      "kind": "ha-integration",
+      "path": "custom_components/ha_housekeeper",
+      "branch": "main"
+    },
+    {
+      "repo": "ha-leishen",
+      "kind": "ha-integration",
+      "path": "custom_components/leishen",
+      "branch": "main"
+    },
+    {
+      "repo": "ha-lixiang",
+      "kind": "ha-integration",
+      "path": "custom_components/lixiang_auto",
+      "branch": "main"
+    },
+    {
+      "repo": "ha-robam-roki",
+      "kind": "ha-integration",
+      "path": "custom_components/robam_roki",
+      "branch": "main"
+    },
+    {
+      "repo": "ha_xiaomi_home",
+      "kind": "ha-integration",
+      "path": "custom_components/xiaomi_home",
+      "branch": "main"
+    },
+    {
+      "repo": "midea_smart_home",
+      "kind": "ha-integration",
+      "path": "custom_components/midea_smart_home",
+      "branch": "staging"
+    },
+    {
+      "repo": "state_grid_info",
+      "kind": "ha-integration",
+      "path": "custom_components/state_grid_info",
+      "branch": "main"
+    },
+    {
       "repo": "magisk-tailscaled",
       "kind": "module",
       "path": ".",
       "branch": "main"
     },
     {
+      "repo": "AppMarket",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "BiliPai",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "Cloud189Checkin",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "cloudflare-docker-proxy",
+      "kind": "software",
+      "path": ".",
+      "branch": "master"
+    },
+    {
+      "repo": "Coolapk-UWP",
+      "kind": "software",
+      "path": ".",
+      "branch": "revived"
+    },
+    {
+      "repo": "hub-mirror",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "HyperCopy_Rules",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
       "repo": "mi-gpt",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "open-xiaoai",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "ShortX-Files",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "TraeTools",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
+    },
+    {
+      "repo": "xiaomi_pad_system_patch_additional_module",
       "kind": "software",
       "path": ".",
       "branch": "main"
