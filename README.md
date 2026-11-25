@@ -2,7 +2,7 @@
 
 一个用 GitHub 原生能力搭起来的「更新项目的项目」：**自动发现账号下所有 fork，比对上游，按规则同步更新**，并可在 fork 更新后**自动打包发布 Release**（HA 集成 / 软件 / 模块）。本地脚本不参与同步逻辑，只负责按按钮；真正的检查、写入与发布都跑在 GitHub Actions 云端。
 
-仓库是私有的，状态与结果都留在本仓库，不需要服务器、不需要数据库、不需要常开的电脑。
+状态与结果都留在本仓库，不需要服务器、不需要数据库、不需要常开的电脑。当前实例为公开仓库，逻辑对公开 / 私有均适用。
 
 当前实例：`shinnaluo/fork-hub`，默认每天 **UTC 01:17 / 北京时间 09:17** 自检一次，全自动模式已开启。
 
@@ -97,7 +97,7 @@ flowchart TB
 
 ### 前置条件
 
-- 一个 GitHub 账号、一个**私有**仓库（本实例 `shinnaluo/fork-hub`，默认分支 `main`，**开启 Issues**）。
+- 一个 GitHub 账号、一个仓库（公开 / 私有均可；本实例 `shinnaluo/fork-hub` 当前为公开，默认分支 `main`，**开启 Issues**）。
 - 一枚 PAT：`FORK_SYNC_PAT`。classic PAT 需 `repo` + `workflow` scope；fine-grained PAT 需覆盖 **All repositories**，权限含 Contents read/write、Metadata read、Actions write。
   - Actions 自带的 `GITHUB_TOKEN` **只作用于当前仓库**，无法写入其他 fork，必须用 PAT。
   - PAT 有有效期，到期后自检会失败，记得续期并更新 secret。
@@ -280,7 +280,7 @@ git checkout -b restore origin/backup/main-before-upstream-<时间戳>
 
 ## 八、注意事项与常见问题
 
-- **定时任务会漂移**：GitHub 的 `schedule` 不保证准点，高峰期可能延迟；公共仓库 60 天无仓库活动会自动停用定时任务（本仓库私有且每日有活动，不受影响）。
+- **定时任务会漂移**：GitHub 的 `schedule` 不保证准点，高峰期可能延迟；公共仓库 60 天无仓库活动会自动停用定时任务（本实例当前为公开，但每日有定时活动，不会触发停用）。
 - **想关掉全自动**：把 Variable `AUTO_APPLY` 改为 `false`，自检会照常进行、刷新状态 Issue，但不再自动 apply，由你手动点按钮。
 - **PAT 过期 / 权限不足**：apply 会在第一步报「缺少 FORK_SYNC_PAT」或 403，检查 PAT 有效期与 scope，更新 Secret 即可，历史数据不会丢。
 - **上游删库 / 私有化 / 改默认分支**：会归类为 `unknown` 并跳过，不会误写 fork。注意上游默认分支不一定是 `main`（例如 `midea_smart_home` 是 `staging`），脚本按 API 返回的默认分支比对。
