@@ -152,6 +152,12 @@
       "kind": "software",
       "path": ".",
       "branch": "main"
+    },
+    {
+      "repo": "mijia_camera",
+      "kind": "ha-integration",
+      "path": "custom_components/mijia_camera",
+      "branch": "main"
     }
   ]
 }
