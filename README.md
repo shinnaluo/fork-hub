@@ -207,8 +207,26 @@ python fork_updater.py --on-rewrite keep        # 兼容旧行为，不清理被
 - `branch` 默认分支不一致时单独指定（如 `XiaomiGateway3` 是 `master`）。
 - `include` / `exclude` 可覆盖默认的 glob 过滤规则；`wrap: false` 可关闭 HA 集成的外层目录。
 - `tag_pattern` 支持 `{repo}`、`{version}`、`{domain}`、`{kind}` 占位符。
+- `ignore` 列出不想自动纳入的 fork 名，同步时会跳过（手动写入 `targets` 的仓库不受影响）。
 
-当前默认清单：`ha-chuanglvjia`、`XiaomiGateway3`、`magisk-tailscaled`、`mi-gpt`。
+当前默认清单：账号下全部 fork（11 个 HA 集成 + 12 个软件 + 1 个 Magisk 模块）以及原创的 `ha-chuanglvjia`。
+
+### 自动同步目标清单
+
+每次 `check forks` 工作流运行时，**在检查更新之前**会先执行 `sync_targets.py`：
+
+1. 调用 GitHub API 列出账号下所有 fork，与 `release-targets.json` 比对；
+2. 发现新 fork 时自动识别类型（`module.prop` / `custom_components/*/manifest.json` / 其余）与默认分支，追加到清单；
+3. 用 `GITHUB_TOKEN` 通过 Contents API 提交清单变更 —— 该令牌的提交**不会触发新的工作流运行**，因此不会形成死循环；
+4. 同步结果写入 Step Summary、状态 Issue 通知（`targets-sync.json`），并随 artifact 上传。
+
+只新增、不删除：原创仓库（如 `ha-chuanglvjia`）和已失效的 fork 不会被自动移除，会在通知里提示。不想自动纳入的 fork 写进 `ignore` 即可。等同于每次检查前自动执行一次 `python sync_targets.py`。
+
+本地可先 dry-run 验收，不写文件、不提交：
+
+```bash
+python sync_targets.py --dry-run --json sync-test.json
+```
 
 ### 三种触发方式
 

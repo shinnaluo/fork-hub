@@ -8,3 +8,5 @@ conflict-guide.md
 dist/
 release.json
 release-test.json
+targets-sync.json
+sync-test.json

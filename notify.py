@@ -269,6 +269,23 @@ def build_message(mode, d, err, s):
                 r.get("name", ""), r.get("behind_by"), r.get("ahead_by"), kind))
         lines.append("")
 
+    if mode == "check":
+        sync_path = os.environ.get("SYNC_PATH", "targets-sync.json")
+        if os.path.exists(sync_path):
+            try:
+                with open(sync_path, encoding="utf-8") as f:
+                    sync = json.load(f)
+                synced = sync.get("added", [])
+                if synced:
+                    tag = "已提交" if sync.get("committed") else "待提交"
+                    lines += ["**新纳入发布清单的 fork（%s）**" % tag, ""]
+                    lines += ["- `%s` → `%s`（%s，分支 `%s`）" % (
+                        x["repo"], x.get("path", "."), x.get("kind", ""), x.get("branch", ""))
+                        for x in synced]
+                    lines.append("")
+            except (OSError, ValueError):
+                pass
+
     if s["conflicts"]:
         lines += ["**需人工处理**", ""]
         for r in s["conflicts"]:

@@ -46,7 +46,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
   issues: write
   actions: write
 
@@ -63,6 +63,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Sync new forks into release targets
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+          WRITE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          python sync_targets.py --json targets-sync.json
+          python - <<'PY'
+          import json, os
+          d = json.load(open("targets-sync.json", encoding="utf-8"))
+          added = d.get("added", [])
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("## 发布目标清单同步\n\n")
+              if d.get("committed"):
+                  f.write("已把 %d 个新 fork 写入 release-targets.json 并提交。\n\n" % len(added))
+              elif added:
+                  f.write("发现 %d 个新 fork，但未提交（可能是 --dry-run）。\n\n" % len(added))
+              else:
+                  f.write("没有新 fork，清单无需变更。\n\n")
+              if added:
+                  f.write("| 仓库 | 类型 | 路径 | 分支 |\n| --- | --- | --- | --- |\n")
+                  for item in added:
+                      f.write("| %s | %s | %s | %s |\n" % (
+                          item["repo"], item["kind"], item["path"], item["branch"]))
+                  f.write("\n")
+              if d.get("stale"):
+                  f.write("提示：清单中已不是 fork 的目标（未自动移除）：%s\n\n" %
+                          ", ".join(d["stale"]))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("added=%d\n" % len(added))
+              f.write("committed=%s\n" % ("true" if d.get("committed") else "false"))
+          PY
 
       - name: Check all forks (read-only)
         env:
@@ -128,6 +163,7 @@ jobs:
           path: |
             plan.json
             fork-report.html
+            targets-sync.json
           retention-days: 14
 
       - name: Push the self-check result
@@ -139,6 +175,7 @@ jobs:
           DATA_PATH: plan.json
           JOB_STATUS: ${{ job.status }}
           APPLY_DISPATCHED: ${{ steps.dispatch.outputs.dispatched }}
+          SYNC_PATH: targets-sync.json
           NOTIFY_SCOPE: ${{ vars.NOTIFY_SCOPE }}
           NOTIFY_LEVEL: ${{ vars.NOTIFY_LEVEL }}
           NOTIFY_MENTION: ${{ vars.NOTIFY_MENTION }}
