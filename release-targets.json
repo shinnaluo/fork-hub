@@ -158,6 +158,12 @@
       "kind": "ha-integration",
       "path": "custom_components/mijia_camera",
       "branch": "main"
+    },
+    {
+      "repo": "MIJIA-device-simluate",
+      "kind": "software",
+      "path": ".",
+      "branch": "main"
     }
   ]
 }
